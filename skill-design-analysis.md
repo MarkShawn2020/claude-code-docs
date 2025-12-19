@@ -1,4 +1,25 @@
-# Claude Code Skill 设计机制深度分析
+---
+title: Claude Code Skill 设计机制深度分析
+---
+
+最近我们对 claude code 的 skills 能力做了一些深度调研，并开发了一个在 claude 里调用 nano-banana-pro 生成图片的 skill（类似工作流），并提供 slash command 封装。
+
+![](http://cdn.cs-magic.cn/picgo/20251210165357950.png?imageslim%7CimageMogr2/format/jpeg/size-limit/1000k!)
+
+![我们的nano-banana-pro生图skill支持图片打开和ascii渲染两种模式](http://cdn.cs-magic.cn/picgo/b1a707f048e6ddd3ef1d0d1e35f0b147.png?imageslim%7CimageMogr2/format/jpeg/size-limit/1000k!)
+
+在这个过程中我们发现，**基于 skill 的单元开发模式（然后对外暴露 skill 接口、command 接口、被 agent 调用等）可能是一种最佳实践**。
+
+基于这些发现，我们很希望通过几篇文章将这个理念进一步推广，以下是本期的第二篇文章：**Claude Code Skill 设计机制深度分析**。在这之前，我们还做过一次技术沙龙，欢迎移步阅读：[十问 Agent Skills：一场围绕 AI 编码新范式的深度研讨](https://mp.weixin.qq.com/s/GItOOuUEZuPD_R-ISdwVaA)。
+
+以及这是我们整理的一些权威内容，希望对你的入门学习有所帮助：
+
+- [Introducing Agent Skills | Claude](https://claude.com/blog/skills)
+- [Agent Skills 官方文档](https://docs.anthropic.com/en/docs/claude-code/skills)
+- [Plugins 文档](https://docs.anthropic.com/en/docs/claude-code/plugins)
+- [Slash Commands 文档](https://docs.anthropic.com/en/docs/claude-code/slash-commands)
+- [Anthropic 工程博客：Equipping agents for the real world with Agent Skills](https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills)
+- [claude-code-docs/docs/skills.md](https://github.com/ericbuess/claude-code-docs/blob/db7f17b264db7be3bf3c469bd8c2acce2fc024a3/docs/skills.md?plain=1)
 
 ## 一、核心设计理念
 
@@ -6,14 +27,7 @@
 
 Skill 的核心设计理念是 **model-invoked**（模型自主调用），与 Slash Commands 的 **user-invoked**（用户显式调用）形成鲜明对比：
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    调用方式对比                              │
-├─────────────────────────────────────────────────────────────┤
-│  Slash Commands:  用户 → /command → Claude 执行            │
-│  Agent Skills:    用户请求 → Claude 判断 → 自动加载 Skill   │
-└─────────────────────────────────────────────────────────────┘
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380530385-iw9axk.png)
 
 这种设计反映了一个核心观点：**Claude 应该像专家一样自主识别何时需要特定领域知识**，而非被动等待用户指定工具。
 
@@ -21,15 +35,9 @@ Skill 的核心设计理念是 **model-invoked**（模型自主调用），与 S
 
 Skill 采用三层加载系统管理上下文：
 
-```
-Layer 1: Metadata (name + description)    ~100 words    [始终在上下文]
-    ↓ 触发条件匹配
-Layer 2: SKILL.md body                    <5k words     [按需加载]
-    ↓ Claude 判断需要
-Layer 3: Bundled resources                Unlimited*    [按需加载]
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380580465-9it9e7.png)
 
-*脚本可以直接执行而无需读入上下文窗口
+\*脚本可以直接执行而无需读入上下文窗口
 
 这种设计解决了 LLM 的核心限制：**上下文窗口有限**。通过分层加载，避免了将所有可能需要的知识预先塞入 prompt。
 
@@ -39,44 +47,25 @@ Layer 3: Bundled resources                Unlimited*    [按需加载]
 
 ### 2.1 Skill 目录结构
 
-```
-skill-name/
-├── SKILL.md                    # [必需] 入口文件
-│   ├── YAML frontmatter        # 元数据：name, description, allowed-tools
-│   └── Markdown instructions   # 核心指令
-└── [可选资源]
-    ├── scripts/                # 可执行脚本 (Python/Bash)
-    ├── references/             # 参考文档（需时加载）
-    └── assets/                 # 输出资源（模板、图片等）
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380583424-ynlhxv.png)
 
 ### 2.2 发现机制（Discovery）
 
 Skill 从三个位置被发现：
 
-| 位置 | 路径 | 用途 |
-|------|------|------|
-| Personal | `~/.claude/skills/` | 个人跨项目 |
-| Project | `.claude/skills/` | 团队共享（git） |
-| Plugin | `~/.claude/plugins/*/skills/` | 插件捆绑 |
+| 位置     | 路径                          | 用途            |
+| -------- | ----------------------------- | --------------- |
+| Personal | `~/.claude/skills/`           | 个人跨项目      |
+| Project  | `.claude/skills/`             | 团队共享（git） |
+| Plugin   | `~/.claude/plugins/*/skills/` | 插件捆绑        |
 
 **发现算法的核心**是 `description` 字段的语义匹配：
 
-```yaml
-# 差的 description（太模糊）
-description: Helps with documents
-
-# 好的 description（具体触发词）
-description: Extract text and tables from PDF files, fill forms, merge documents.
-             Use when working with PDF files or when the user mentions PDFs, forms,
-             or document extraction.
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380585689-jq7zya.png)
 
 ### 2.3 allowed-tools 权限控制
 
-```yaml
-allowed-tools: Read, Grep, Glob
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380590003-f3egjs.png)
 
 这个字段实现了 **最小权限原则**：
 
@@ -90,39 +79,18 @@ allowed-tools: Read, Grep, Glob
 
 ### 3.1 完整的扩展体系
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                   Claude Code 扩展体系                            │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Slash Commands ──────────────────────────────────────────────── │
-│  │ 单文件 .md | 用户显式调用 | 简单提示模板                       │
-│                                                                  │
-│  Agent Skills ───────────────────────────────────────────────────│
-│  │ 目录结构 | 模型自主调用 | 复杂能力+资源                        │
-│                                                                  │
-│  Hooks ──────────────────────────────────────────────────────────│
-│  │ 事件驱动 | 自动触发 | 工作流自动化                             │
-│                                                                  │
-│  MCP Servers ────────────────────────────────────────────────────│
-│  │ 外部服务 | 工具集成 | API 接口                                 │
-│                                                                  │
-│  Plugins ────────────────────────────────────────────────────────│
-│  │ 打包分发 | 组合以上所有 | 团队/社区共享                        │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380591935-0e0e10.png)
 
 ### 3.2 Skill vs Slash Command 详细对比
 
-| 维度 | Slash Command | Agent Skill |
-|------|---------------|-------------|
-| 触发方式 | `/command` 显式调用 | 语义匹配自动触发 |
-| 文件结构 | 单个 `.md` 文件 | 目录 + `SKILL.md` + 资源 |
-| 复杂度 | 简单提示片段 | 完整工作流 |
-| 资源支持 | 无 | scripts/, references/, assets/ |
-| 权限控制 | 无 | `allowed-tools` 字段 |
-| 适用场景 | 重复性简单指令 | 领域专业能力 |
+| 维度     | Slash Command       | Agent Skill                    |
+| -------- | ------------------- | ------------------------------ |
+| 触发方式 | `/command` 显式调用 | 语义匹配自动触发               |
+| 文件结构 | 单个 `.md` 文件     | 目录 + `SKILL.md` + 资源       |
+| 复杂度   | 简单提示片段        | 完整工作流                     |
+| 资源支持 | 无                  | scripts/, references/, assets/ |
+| 权限控制 | 无                  | `allowed-tools` 字段           |
+| 适用场景 | 重复性简单指令      | 领域专业能力                   |
 
 ---
 
@@ -132,30 +100,20 @@ allowed-tools: Read, Grep, Glob
 
 Skill 本质上是给另一个 Claude 实例的"入职指南"：
 
-```markdown
-# 设计思想
-Skill = 将领域专家的程序性知识编码为可被 AI 消费的格式
-
-# 目标
-将 Claude 从通用代理 → 特定领域的专业代理
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380597324-6pgrnw.png)
 
 这解释了为什么 SKILL.md 的写作风格强调：
+
 - **祈使句/动词形式**（而非第二人称）
 - 包含 Claude 本身不会自然知道的**程序性知识**
 - 提供**具体例子和错误恢复策略**
 
 ### 4.2 资源分类策略
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  scripts/     →  执行层（token 高效，确定性输出）            │
-│  references/  →  知识层（按需加载，信息源）                  │
-│  assets/      →  输出层（模板/素材，不进入上下文）           │
-└─────────────────────────────────────────────────────────────┘
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380598733-fxbrmd.png)
 
 **决策树**：
+
 - 代码会被重复编写？→ `scripts/`
 - 信息需要被参考？→ `references/`
 - 文件用于输出？→ `assets/`
@@ -164,18 +122,10 @@ Skill = 将领域专家的程序性知识编码为可被 AI 消费的格式
 
 以官方 `pdf` skill 为例：
 
-```yaml
----
-name: pdf
-description: Comprehensive PDF manipulation toolkit for extracting text
-             and tables, creating new PDFs, merging/splitting documents,
-             and handling forms. When Claude needs to fill in a PDF form
-             or programmatically process, generate, or analyze PDF
-             documents at scale.
----
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380600536-77apmz.png)
 
 **设计要点**：
+
 1. description 包含动作词（extracting, creating, merging, filling）
 2. 明确触发条件（"When Claude needs to..."）
 3. SKILL.md 只包含核心指令，详细内容在 `reference.md` 和 `forms.md`
@@ -189,23 +139,11 @@ description: Comprehensive PDF manipulation toolkit for extracting text
 
 Skill 被暴露为一个可调用的工具，Claude 通过 `skill: "skill-name"` 来激活：
 
-```xml
-<function>
-  "name": "Skill"
-  "description": "Execute a skill within the main conversation..."
-</function>
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380602316-9vwy7m.png)
 
 ### 5.2 激活流程
 
-```
-1. Claude 分析用户请求
-2. 检查 available_skills 列表（在 system prompt 中）
-3. 匹配 description 与用户意图
-4. 调用 Skill 工具: skill: "pdf"
-5. SKILL.md 内容被注入上下文
-6. Claude 按照 SKILL.md 指令执行
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380603676-k3iku6.png)
 
 ---
 
@@ -213,35 +151,26 @@ Skill 被暴露为一个可调用的工具，Claude 通过 `skill: "skill-name"`
 
 ### 6.1 Description 写作原则
 
-```yaml
-# ✗ 错误
-description: For data analysis
-
-# ✓ 正确
-description: Analyze sales data in Excel files and CRM exports.
-             Use for sales reports, pipeline analysis, and revenue tracking.
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380605587-m8mi7m.png)
 
 **关键要素**：
+
 - 具体的动作（analyze, extract, generate）
 - 明确的对象（Excel files, CRM exports）
 - 触发场景（"Use when...", "Use for..."）
 
 ### 6.2 避免的问题
 
-| 问题 | 原因 | 解决方案 |
-|------|------|----------|
-| Skill 不被触发 | description 太模糊 | 添加具体触发词 |
-| 多 Skill 冲突 | description 重叠 | 使用独特的领域词汇 |
-| 上下文爆炸 | SKILL.md 太长 | 拆分到 references/ |
-| 脚本权限问题 | 未设置执行权限 | `chmod +x scripts/*.py` |
+| 问题           | 原因               | 解决方案                |
+| -------------- | ------------------ | ----------------------- |
+| Skill 不被触发 | description 太模糊 | 添加具体触发词          |
+| 多 Skill 冲突  | description 重叠   | 使用独特的领域词汇      |
+| 上下文爆炸     | SKILL.md 太长      | 拆分到 references/      |
+| 脚本权限问题   | 未设置执行权限     | `chmod +x scripts/*.py` |
 
 ### 6.3 SKILL.md 长度控制
 
-```
-推荐: SKILL.md < 5000 words
-原则: 核心流程在 SKILL.md，详细参考在 references/
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380607778-0hmsbb.png)
 
 ---
 
@@ -249,30 +178,11 @@ description: Analyze sales data in Excel files and CRM exports.
 
 ### 7.1 分发机制
 
-```
-开发者创建 Skill
-    ↓
-打包为 Plugin（包含 skills/ 目录）
-    ↓
-发布到 Marketplace
-    ↓
-用户安装 Plugin
-    ↓
-Skills 自动可用
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380609013-9iuhrs.png)
 
 ### 7.2 Plugin 中的 Skill 结构
 
-```
-my-plugin/
-├── .claude-plugin/
-│   └── plugin.json
-├── skills/
-│   └── my-skill/
-│       ├── SKILL.md
-│       └── scripts/
-└── commands/
-```
+![](http://cdn.cs-magic.cn/lovpen/codeblock-1765380610140-vcsek9.png)
 
 ---
 
@@ -308,12 +218,3 @@ Claude Code 的 Skill 机制体现了一个核心设计理念：
 4. **权限可控**：`allowed-tools` 实现最小权限
 
 Skill 系统是 Claude Code 从"AI 助手"向"AI 专家团队"演进的关键基础设施。
-
----
-
-## 附录：参考资源
-
-- [Agent Skills 官方文档](https://docs.anthropic.com/en/docs/claude-code/skills)
-- [Plugins 文档](https://docs.anthropic.com/en/docs/claude-code/plugins)
-- [Slash Commands 文档](https://docs.anthropic.com/en/docs/claude-code/slash-commands)
-- [Anthropic 工程博客：Equipping agents for the real world with Agent Skills](https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills)
